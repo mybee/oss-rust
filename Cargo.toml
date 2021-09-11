@@ -1,0 +1,18 @@
+[package]
+name = "oss-sdk"
+version = "0.0.1"
+edition = "2018"
+readme = "README.md"
+
+[dependencies]
+reqwest = { version = "0.11.4", features = ["blocking"] }
+base64 = "0.13.0"
+chrono = "0.4"
+rust-crypto = "^0.2"
+log = "0.4.6"
+quick-xml = "0.22.0"
+derive_more = "0.99.5"
+bytes = "1.1.0"
+
+[dev-dependencies]
+tokio = { version = "1.11.0", features = ["full"] }
