@@ -154,7 +154,7 @@ impl OSS {
         result
     }
 
-    async fn list_bucket<S, R>(&self, resources: R) -> Result<ListBuckets, Error>
+    pub async fn list_bucket<S, R>(&self, resources: R) -> Result<ListBuckets, Error>
     where
         S: AsRef<str>,
         R: Into<Option<HashMap<S, Option<S>>>>,
@@ -405,7 +405,7 @@ impl OSS {
         Ok(res.bytes().await?)
     }
 
-    async fn put_object_from_file<S1, S2, S3, H, R>(
+    pub async fn put_object_from_file<S1, S2, S3, H, R>(
         &self,
         file: S1,
         object_name: S2,
@@ -463,7 +463,7 @@ impl OSS {
         }
     }
 
-    async fn delete_object<S>(&self, object_name: S) -> Result<(), Error>
+    pub async fn delete_object<S>(&self, object_name: S) -> Result<(), Error>
     where
         S: AsRef<str>,
     {
