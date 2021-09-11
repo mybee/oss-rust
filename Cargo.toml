@@ -3,7 +3,7 @@ name = "oss-sdk"
 version = "0.0.1"
 edition = "2018"
 readme = "README.md"
-description = "Aliyun OSS SDK"
+description = "OSS rust SDK"
 license = "Apache-2.0"
 repository = "https://github.com/mybee/oss-rust"
 
