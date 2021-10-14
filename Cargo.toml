@@ -1,6 +1,6 @@
 [package]
 name = "oss-sdk"
-version = "0.0.2"
+version = "0.1.0"
 edition = "2018"
 readme = "README.md"
 description = "OSS rust SDK"
@@ -16,6 +16,10 @@ log = "0.4.6"
 quick-xml = "0.22.0"
 derive_more = "0.99.5"
 bytes = "1.1.0"
+serde-xml-rs = "0.5.1"
+serde_derive = "1.0.130"
+serde = "1.0.130"
+tokio = { version = "1.11.0", features = ["full"] }
 
 [dev-dependencies]
-tokio = { version = "1.11.0", features = ["full"] }
+

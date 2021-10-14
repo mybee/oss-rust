@@ -2,8 +2,10 @@ use super::errors::Error;
 use bytes::Bytes;
 use chrono::prelude::*;
 use quick_xml::{events::Event, Reader};
-use reqwest::header::{HeaderMap, CONTENT_LENGTH, DATE};
+use reqwest::header::{HeaderMap, CONTENT_LENGTH, DATE, ETAG};
 use reqwest::Client;
+use serde_derive::{Deserialize, Serialize};
+use serde_xml_rs::{from_str, to_string};
 use std::collections::HashMap;
 use std::str;
 
@@ -463,6 +465,172 @@ impl OSS {
         }
     }
 
+    // https://help.aliyun.com/document_detail/31992.html
+    pub async fn initiate_multipart_upload<S2, S3, H>(
+        &self,
+        object_name: S2,
+        headers: H,
+    ) -> Result<String, Error>
+    where
+        S2: AsRef<str>,
+        S3: AsRef<str>,
+        H: Into<Option<HashMap<S3, S3>>>,
+    {
+        let object_name = object_name.as_ref();
+        let resources_str = "uploads";
+
+        let host = self.host(self.bucket(), object_name, resources_str);
+        let date = self.date();
+        let mut headers = if let Some(h) = headers.into() {
+            to_headers(h)?
+        } else {
+            HeaderMap::new()
+        };
+        headers.insert(DATE, date.parse()?);
+        let authorization = self.oss_sign(
+            "POST",
+            self.key_id(),
+            self.key_secret(),
+            self.bucket(),
+            object_name,
+            resources_str,
+            &headers,
+        );
+        headers.insert("Authorization", authorization.parse()?);
+
+        let resp = self.client.post(&host).headers(headers).send().await?;
+
+        if resp.status().is_success() {
+            #[derive(Debug, Serialize, Deserialize, PartialEq)]
+            struct InitiateMultipartUploadResult {
+                Bucket: String,
+                Key: String,
+                UploadId: String,
+            }
+
+            let init: InitiateMultipartUploadResult =
+                from_str(&resp.text().await.unwrap()).unwrap();
+            Ok(init.UploadId)
+        } else {
+            Err(Error::Object(ObjectError::PutError {
+                msg: format!("can not put object, status code: {}", resp.status()).into(),
+            }))
+        }
+    }
+
+    // https://help.aliyun.com/document_detail/31993.html
+    pub async fn upload_part<S1, S2, S3, H>(
+        &self,
+        file: S1,
+        object_name: S2,
+        chunk: FileChunk,
+        upload_id: String,
+        headers: H,
+    ) -> Result<String, Error>
+    where
+        S1: AsRef<str>,
+        S2: AsRef<str>,
+        S3: AsRef<str>,
+        H: Into<Option<HashMap<S3, S3>>>,
+    {
+        let object_name = object_name.as_ref();
+        let resources_str = &format!("partNumber={}&uploadId={}", chunk.number, upload_id);
+
+        let host = self.host(self.bucket(), object_name, resources_str);
+        let date = self.date();
+        let mut headers = if let Some(h) = headers.into() {
+            to_headers(h)?
+        } else {
+            HeaderMap::new()
+        };
+        headers.insert(DATE, date.parse()?);
+
+        let authorization = self.oss_sign(
+            "PUT",
+            self.key_id(),
+            self.key_secret(),
+            self.bucket(),
+            object_name,
+            resources_str,
+            &headers,
+        );
+        headers.insert("Authorization", authorization.parse()?);
+
+        let buf = load_chunk_file(file, chunk.offset, chunk.size)?;
+        headers.insert(CONTENT_LENGTH, buf.len().to_string().parse()?);
+
+        let resp = self
+            .client
+            .put(&host)
+            .headers(headers)
+            .body(buf)
+            .send()
+            .await?;
+
+        if resp.status().is_success() {
+            let etag = resp.headers().get(ETAG).unwrap().to_str().unwrap();
+            Ok(etag.to_owned())
+        } else {
+            Err(Error::Object(ObjectError::PutError {
+                msg: format!("can not put object, status code: {}", resp.status()).into(),
+            }))
+        }
+    }
+
+    // https://help.aliyun.com/document_detail/31993.html
+    pub async fn complete_multipart_upload<S1, S3, H>(
+        &self,
+        object_name: S1,
+        upload_id: String,
+        complete: CompleteMultipartUpload,
+        headers: H,
+    ) -> Result<(), Error>
+    where
+        S1: AsRef<str>,
+        S3: AsRef<str>,
+        H: Into<Option<HashMap<S3, S3>>>,
+    {
+        let object_name = object_name.as_ref();
+        let resources_str = &format!("uploadId={}", upload_id);
+
+        let host = self.host(self.bucket(), object_name, resources_str);
+        let buf = get_complete_str(complete);
+        let date = self.date();
+        let mut headers = if let Some(h) = headers.into() {
+            to_headers(h)?
+        } else {
+            HeaderMap::new()
+        };
+        headers.insert(DATE, date.parse()?);
+        let authorization = self.oss_sign(
+            "POST",
+            self.key_id(),
+            self.key_secret(),
+            self.bucket(),
+            object_name,
+            resources_str,
+            &headers,
+        );
+        headers.insert("Authorization", authorization.parse()?);
+        headers.insert(CONTENT_LENGTH, buf.len().to_string().parse()?);
+
+        let resp = self
+            .client
+            .post(&host)
+            .headers(headers)
+            .body(buf)
+            .send()
+            .await?;
+
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(Error::Object(ObjectError::PutError {
+                msg: format!("can not put object, status code: {}", resp.status()).into(),
+            }))
+        }
+    }
+
     pub async fn delete_object<S>(&self, object_name: S) -> Result<(), Error>
     where
         S: AsRef<str>,
@@ -496,22 +664,117 @@ impl OSS {
     }
 }
 
+// <CompleteMultipartUpload>
+// <Part>
+// <PartNumber>PartNumber</PartNumber>
+// <ETag>ETag</ETag>
+// </Part>
+// ...
+// </CompleteMultipartUpload>
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+pub struct CompleteMultipartUpload {
+    Part: Vec<Part>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+pub struct Part {
+    PartNumber: u64,
+    ETag: String,
+}
+
+fn get_complete_str(complete: CompleteMultipartUpload) -> String {
+    let mut str = String::from("<CompleteMultipartUpload>");
+    for p in complete.Part {
+        str.push_str(&to_string(&p).unwrap());
+    }
+    str.push_str("</CompleteMultipartUpload>");
+    str
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    // https://github.com/RReverser/serde-xml-rs
+    // waiting for the serde-xml-rs to fix the serde vector bug
+    fn test_get_complete_str() {
+        let complete = CompleteMultipartUpload {
+            Part: vec![
+                Part {
+                    PartNumber: 2,
+                    ETag: r#""test""#.to_string(),
+                },
+                Part {
+                    PartNumber: 2,
+                    ETag: r#""123""#.to_string(),
+                },
+            ],
+        };
+
+        let str = get_complete_str(complete);
+        assert_eq!(str, "<CompleteMultipartUpload><Part><PartNumber>2</PartNumber><ETag>\"test\"</ETag></Part><Part><PartNumber>2</PartNumber><ETag>\"123\"</ETag></Part></CompleteMultipartUpload>");
+    }
+
+    fn get_oss_instance() -> OSS {
+        let oss_instance = OSS::new(
+            "xxx".to_string(),
+            "xxx".to_string(),
+            "xxx.aliyuncs.com".to_string(),
+            "xxx".to_string(),
+        );
+        oss_instance
+    }
+
     #[tokio::test]
     async fn test_oss() {
-        let oss_instance = OSS::new(
-            "key".to_string(),
-            "secret".to_string(),
-            "xxxx.aliyuncs.com".to_string(),
-            "xxxx".to_string(),
-        );
-
+        let oss_instance = get_oss_instance();
         put_object(&oss_instance).await;
         get_object(&oss_instance).await;
         delete_object(&oss_instance).await;
+    }
+
+    #[tokio::test]
+    async fn test_oss_multi_upload() {
+        let oss_instance = get_oss_instance();
+        let object_name = "object_name";
+        let file = "/tmp/tmp.txt";
+
+        // init multi upload
+        let upload_id = oss_instance
+            .initiate_multipart_upload(object_name, None::<HashMap<&str, &str>>)
+            .await
+            .unwrap();
+        // chunk object
+        let chunks = split_file_by_part_size(file, 1024).await.unwrap();
+        // part upload
+        let mut parts = vec![];
+        for chunk in chunks {
+            let etag = oss_instance
+                .upload_part(
+                    file,
+                    object_name,
+                    chunk.clone(),
+                    upload_id.clone(),
+                    None::<HashMap<&str, &str>>,
+                )
+                .await
+                .unwrap();
+            parts.push(Part {
+                PartNumber: chunk.number,
+                ETag: etag,
+            });
+        }
+        // complete multi upload
+        let res = oss_instance
+            .complete_multipart_upload(
+                object_name,
+                upload_id,
+                CompleteMultipartUpload { Part: parts },
+                None::<HashMap<&str, &str>>,
+            )
+            .await;
+        assert!(res.is_ok());
     }
 
     async fn put_object(oss_instance: &OSS) {
@@ -533,6 +796,7 @@ mod tests {
         assert_eq!(result.is_ok(), true);
         println!("text = {:?}", String::from_utf8(result.unwrap().to_vec()));
     }
+
     async fn delete_object(oss_instance: &OSS) {
         let result = oss_instance.delete_object("objectName").await;
         assert_eq!(result.is_ok(), true);

@@ -2,6 +2,7 @@ use quick_xml::Error as QxmlError;
 use reqwest::header::InvalidHeaderName as HttpInvalidHeaderNameError;
 use reqwest::header::InvalidHeaderValue as HttpInvalidHeaderValueError;
 use reqwest::Error as ReqwestError;
+use serde_xml_rs::Error as XmlError;
 use std::error::Error as StdError;
 use std::io::Error as IoError;
 use std::string::FromUtf8Error;
@@ -13,7 +14,9 @@ pub enum Error {
     String(FromUtf8Error),
     Reqwest(ReqwestError),
     Qxml(QxmlError),
+    Xml(XmlError),
     Http(HttpError),
+    E(String),
 }
 
 #[derive(Debug, Display)]
@@ -25,6 +28,12 @@ pub enum HttpError {
 impl From<QxmlError> for Error {
     fn from(e: QxmlError) -> Error {
         Error::Qxml(e)
+    }
+}
+
+impl From<XmlError> for Error {
+    fn from(e: XmlError) -> Error {
+        Error::Xml(e)
     }
 }
 
