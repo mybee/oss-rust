@@ -632,21 +632,21 @@ impl OSS {
     }
 
     // <MinSizeAllowed>102400</MinSizeAllowed>
-    pub async fn chunk_upload_by_size<S1>(
+    pub async fn chunk_upload_by_size<S1, H>(
         &self,
         object_name: S1,
         file: S1,
         chunk_size: u64,
+        headers: H,
     ) -> Result<(), Error>
     where
         S1: AsRef<str>,
+        H: Into<Option<HashMap<S1, S1>>>,
     {
         let object_name = object_name.as_ref();
         let file = file.as_ref();
         // init multi upload
-        let upload_id = self
-            .initiate_multipart_upload(object_name, None::<HashMap<&str, &str>>)
-            .await?;
+        let upload_id = self.initiate_multipart_upload(object_name, headers).await?;
         // chunk object
         let chunks = split_file_by_part_size(file, chunk_size).await.unwrap();
         // part upload
@@ -661,7 +661,6 @@ impl OSS {
                     None::<HashMap<&str, &str>>,
                 )
                 .await?;
-            println!("chunk: {:?}, etag: {:?}", chunk, etag);
             parts.push(Part {
                 PartNumber: chunk.number,
                 ETag: etag,
@@ -788,7 +787,7 @@ mod tests {
         let chunk_size = 102400;
 
         let res = oss_instance
-            .chunk_upload_by_size(object_name, file, chunk_size)
+            .chunk_upload_by_size(object_name, file, chunk_size, None::<HashMap<&str, &str>>)
             .await;
         println!("res: {:?}", res);
         assert!(res.is_ok());
