@@ -460,13 +460,13 @@ impl OSS {
             Ok(())
         } else {
             Err(Error::Object(ObjectError::PutError {
-                msg: format!("can not put object, status code: {}", resp.status()).into(),
+                msg: format!("can not put object, reason: {:?}", resp.text().await).into(),
             }))
         }
     }
 
     // https://help.aliyun.com/document_detail/31992.html
-    pub async fn initiate_multipart_upload<S2, S3, H>(
+    async fn initiate_multipart_upload<S2, S3, H>(
         &self,
         object_name: S2,
         headers: H,
@@ -513,13 +513,13 @@ impl OSS {
             Ok(init.UploadId)
         } else {
             Err(Error::Object(ObjectError::PutError {
-                msg: format!("can not put object, status code: {}", resp.status()).into(),
+                msg: format!("can not put object, reason: {:?}", resp.text().await).into(),
             }))
         }
     }
 
     // https://help.aliyun.com/document_detail/31993.html
-    pub async fn upload_part<S1, S2, S3, H>(
+    async fn upload_part<S1, S2, S3, H>(
         &self,
         file: S1,
         object_name: S2,
@@ -572,13 +572,13 @@ impl OSS {
             Ok(etag.to_owned())
         } else {
             Err(Error::Object(ObjectError::PutError {
-                msg: format!("can not put object, status code: {}", resp.status()).into(),
+                msg: format!("can not put object, reason: {:?}", resp.text().await).into(),
             }))
         }
     }
 
     // https://help.aliyun.com/document_detail/31993.html
-    pub async fn complete_multipart_upload<S1, S3, H>(
+    async fn complete_multipart_upload<S1, S3, H>(
         &self,
         object_name: S1,
         upload_id: String,
@@ -626,9 +626,55 @@ impl OSS {
             Ok(())
         } else {
             Err(Error::Object(ObjectError::PutError {
-                msg: format!("can not put object, status code: {}", resp.status()).into(),
+                msg: format!("can not put object, status code: {:?}", resp.text().await).into(),
             }))
         }
+    }
+
+    // <MinSizeAllowed>102400</MinSizeAllowed>
+    pub async fn chunk_upload_by_size<S1>(
+        &self,
+        object_name: S1,
+        file: S1,
+        chunk_size: u64,
+    ) -> Result<(), Error>
+    where
+        S1: AsRef<str>,
+    {
+        let object_name = object_name.as_ref();
+        let file = file.as_ref();
+        // init multi upload
+        let upload_id = self
+            .initiate_multipart_upload(object_name, None::<HashMap<&str, &str>>)
+            .await?;
+        // chunk object
+        let chunks = split_file_by_part_size(file, chunk_size).await.unwrap();
+        // part upload
+        let mut parts = vec![];
+        for chunk in chunks {
+            let etag = self
+                .upload_part(
+                    file,
+                    object_name,
+                    chunk.clone(),
+                    upload_id.clone(),
+                    None::<HashMap<&str, &str>>,
+                )
+                .await?;
+            println!("chunk: {:?}, etag: {:?}", chunk, etag);
+            parts.push(Part {
+                PartNumber: chunk.number,
+                ETag: etag,
+            });
+        }
+        // complete multi upload
+        self.complete_multipart_upload(
+            object_name,
+            upload_id,
+            CompleteMultipartUpload { Part: parts },
+            None::<HashMap<&str, &str>>,
+        )
+        .await
     }
 
     pub async fn delete_object<S>(&self, object_name: S) -> Result<(), Error>
@@ -658,7 +704,7 @@ impl OSS {
             Ok(())
         } else {
             Err(Error::Object(ObjectError::DeleteError {
-                msg: format!("can not delete object, status code: {}", resp.status()).into(),
+                msg: format!("can not delete object, reason: {:?}", resp.text().await).into(),
             }))
         }
     }
@@ -739,41 +785,12 @@ mod tests {
         let oss_instance = get_oss_instance();
         let object_name = "object_name";
         let file = "/tmp/tmp.txt";
+        let chunk_size = 102400;
 
-        // init multi upload
-        let upload_id = oss_instance
-            .initiate_multipart_upload(object_name, None::<HashMap<&str, &str>>)
-            .await
-            .unwrap();
-        // chunk object
-        let chunks = split_file_by_part_size(file, 1024).await.unwrap();
-        // part upload
-        let mut parts = vec![];
-        for chunk in chunks {
-            let etag = oss_instance
-                .upload_part(
-                    file,
-                    object_name,
-                    chunk.clone(),
-                    upload_id.clone(),
-                    None::<HashMap<&str, &str>>,
-                )
-                .await
-                .unwrap();
-            parts.push(Part {
-                PartNumber: chunk.number,
-                ETag: etag,
-            });
-        }
-        // complete multi upload
         let res = oss_instance
-            .complete_multipart_upload(
-                object_name,
-                upload_id,
-                CompleteMultipartUpload { Part: parts },
-                None::<HashMap<&str, &str>>,
-            )
+            .chunk_upload_by_size(object_name, file, chunk_size)
             .await;
+        println!("res: {:?}", res);
         assert!(res.is_ok());
     }
 
