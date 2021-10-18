@@ -21,19 +21,10 @@ let filename = "filename";
 let oss_instance = OSS::new("your_AccessKeyId", "your_AccessKeySecret", "your_Endpoint", "your_Bucket");
 let object_name = "object_name";
 let file = "/tmp/tmp.txt";
+let chunk_size = 102400;
 
-// init multi upload
-let upload_id = oss_instance.initiate_multipart_upload(object_name, None::<HashMap<&str, &str>>).await.unwrap();
-// chunk object by size
-let chunks = split_file_by_part_size(file, 1024).await.unwrap();
-// part upload chunks
-let mut parts = vec![];
-for chunk in chunks {
-    let etag = oss_instance.upload_part(file,object_name,chunk.clone(),upload_id.clone(),None::<HashMap<&str, &str>>).await.unwrap();
-    parts.push(Part {PartNumber: chunk.number,ETag: etag,});
-}
-// complete multi upload
-let res = oss_instance.complete_multipart_upload(object_name,upload_id,CompleteMultipartUpload { Part: parts },None::<HashMap<&str, &str>>).await;
+let res = oss_instance.chunk_upload_by_size(object_name, file, chunk_size).await;
+println!("res: {:?}", res);
 ```
 
 ## Delete Ojbect
