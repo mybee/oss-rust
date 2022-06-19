@@ -2,8 +2,9 @@ use super::errors::Error;
 use reqwest::header::{HeaderMap, HeaderName};
 use std::collections::HashMap;
 use std::fs::File;
+use std::io::Seek;
+use std::io::SeekFrom;
 use std::io::{BufReader, Read};
-use std::os::unix::prelude::FileExt;
 use std::vec;
 
 #[inline]
@@ -25,9 +26,10 @@ where
     S: AsRef<str>,
 {
     let p = p.as_ref();
-    let f = File::open(p)?;
+    let mut f = File::open(p)?;
     let mut buf = vec![0u8; size];
-    f.read_at(&mut buf, offset)?;
+    f.seek(SeekFrom::Start(offset))?;
+    f.read(&mut buf)?;
     Ok(buf)
 }
 
