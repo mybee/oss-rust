@@ -631,6 +631,48 @@ impl OSS {
         }
     }
 
+    // https://help.aliyun.com/document_detail/31996.html
+    async fn abort_multipart_upload<S1>(
+        &self,
+        object_name: S1,
+        upload_id: String,
+    ) -> Result<(), Error>
+    where
+        S1: AsRef<str>,
+    {
+        let object_name = object_name.as_ref();
+        let resources_str = &format!("uploadId={}", upload_id);
+
+        let host = self.host(self.bucket(), object_name, resources_str);
+        let date = self.date();
+        let mut headers = HeaderMap::new();
+        headers.insert(DATE, date.parse()?);
+        let authorization = self.oss_sign(
+            "DELETE",
+            self.key_id(),
+            self.key_secret(),
+            self.bucket(),
+            object_name,
+            resources_str,
+            &headers,
+        );
+        headers.insert("Authorization", authorization.parse()?);
+
+        let resp = self.client.delete(&host).send().await?;
+
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(Error::Object(ObjectError::DeleteError {
+                msg: format!(
+                    "can not abort multipart upload, reason: {:?}",
+                    resp.text().await
+                )
+                .into(),
+            }))
+        }
+    }
+
     // <MinSizeAllowed>102400</MinSizeAllowed>
     pub async fn chunk_upload_by_size<S1, H>(
         &self,
@@ -645,14 +687,17 @@ impl OSS {
     {
         let object_name = object_name.as_ref();
         let file = file.as_ref();
+        // chunk object
+        let chunks = split_file_by_part_size(file, chunk_size).await?;
+        if chunks.is_empty() {
+            return Err(Error::E("chunks is empty".to_owned()));
+        }
         // init multi upload
         let upload_id = self.initiate_multipart_upload(object_name, headers).await?;
-        // chunk object
-        let chunks = split_file_by_part_size(file, chunk_size).await.unwrap();
         // part upload
         let mut parts = vec![];
         for chunk in chunks {
-            let etag = self
+            let etag = match self
                 .upload_part(
                     file,
                     object_name,
@@ -660,7 +705,14 @@ impl OSS {
                     upload_id.clone(),
                     None::<HashMap<&str, &str>>,
                 )
-                .await?;
+                .await
+            {
+                Ok(etag) => etag,
+                Err(e) => {
+                    let _ = self.abort_multipart_upload(object_name, upload_id).await;
+                    return Err(e);
+                }
+            };
             parts.push(Part {
                 PartNumber: chunk.number,
                 ETag: etag,
