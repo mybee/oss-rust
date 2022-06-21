@@ -15,10 +15,10 @@ pub async fn load_file(f: &mut File) -> Result<Vec<u8>, Error> {
 }
 
 #[inline]
-pub async fn load_chunk_file(f: &mut File, offset: u64, size: usize) -> Result<Vec<u8>, Error> {
-    let mut buf = vec![0u8; size];
+pub async fn load_chunk_file(f: &mut File, offset: u64, size: u64) -> Result<Vec<u8>, Error> {
+    let mut buf = Vec::with_capacity(size as usize);
     f.seek(SeekFrom::Start(offset)).await?;
-    f.read(&mut buf).await?;
+    f.take(size).read_to_end(&mut buf).await?;
     Ok(buf)
 }
 
@@ -39,7 +39,7 @@ where
 pub struct FileChunk {
     pub number: u64,
     pub offset: u64,
-    pub size: usize,
+    pub size: u64,
 }
 
 // split_file_by_part_size splits big file into parts by the size of parts.
@@ -64,7 +64,7 @@ pub async fn split_file_by_part_size(f: &File, chunk_size: u64) -> Result<Vec<Fi
         let chunk = FileChunk {
             number: i + 1,
             offset: i * chunk_size,
-            size: chunk_size as usize,
+            size: chunk_size,
         };
         chunks.push(chunk);
         i = i + 1;
@@ -74,7 +74,7 @@ pub async fn split_file_by_part_size(f: &File, chunk_size: u64) -> Result<Vec<Fi
         let chunk = FileChunk {
             number: chunks.len() as u64 + 1,
             offset: chunks.len() as u64 * chunk_size,
-            size: (size % chunk_size) as usize,
+            size: size % chunk_size,
         };
         chunks.push(chunk);
     }
