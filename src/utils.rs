@@ -1,33 +1,24 @@
 use super::errors::Error;
 use reqwest::header::{HeaderMap, HeaderName};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufReader, Read};
-use std::os::unix::prelude::FileExt;
 use std::vec;
+use tokio::fs::File;
+use tokio::io::BufReader;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 
 #[inline]
-pub fn load_file<S>(p: S) -> Result<Vec<u8>, Error>
-where
-    S: AsRef<str>,
-{
-    let p = p.as_ref();
-    let f = File::open(p)?;
+pub async fn load_file(f: &mut File) -> Result<Vec<u8>, Error> {
     let mut f = BufReader::new(f);
     let mut s = Vec::new();
-    f.read_to_end(&mut s)?;
+    f.read_to_end(&mut s).await?;
     Ok(s)
 }
 
 #[inline]
-pub fn load_chunk_file<S>(p: S, offset: u64, size: usize) -> Result<Vec<u8>, Error>
-where
-    S: AsRef<str>,
-{
-    let p = p.as_ref();
-    let f = File::open(p)?;
-    let mut buf = vec![0u8; size];
-    f.read_at(&mut buf, offset)?;
+pub async fn load_chunk_file(f: &mut File, offset: u64, size: u64) -> Result<Vec<u8>, Error> {
+    let mut buf = Vec::with_capacity(size as usize);
+    f.seek(SeekFrom::Start(offset)).await?;
+    f.take(size).read_to_end(&mut buf).await?;
     Ok(buf)
 }
 
@@ -48,22 +39,17 @@ where
 pub struct FileChunk {
     pub number: u64,
     pub offset: u64,
-    pub size: usize,
+    pub size: u64,
 }
 
 // split_file_by_part_size splits big file into parts by the size of parts.
 // Splits the file by the part size. Returns the FileChunk when error is nil.
-pub async fn split_file_by_part_size(
-    file_name: &str,
-    chunk_size: u64,
-) -> Result<Vec<FileChunk>, Error> {
+pub async fn split_file_by_part_size(f: &File, chunk_size: u64) -> Result<Vec<FileChunk>, Error> {
     if chunk_size <= 0 {
         return Err(Error::E("chunk_size invalid".to_string()));
     }
 
-    let file = tokio::fs::File::open(file_name).await?;
-
-    let size = file.metadata().await?.len();
+    let size = f.metadata().await?.len();
 
     let chunk_n = size / chunk_size;
     if chunk_n >= 10000 {
@@ -78,7 +64,7 @@ pub async fn split_file_by_part_size(
         let chunk = FileChunk {
             number: i + 1,
             offset: i * chunk_size,
-            size: chunk_size as usize,
+            size: chunk_size,
         };
         chunks.push(chunk);
         i = i + 1;
@@ -88,7 +74,7 @@ pub async fn split_file_by_part_size(
         let chunk = FileChunk {
             number: chunks.len() as u64 + 1,
             offset: chunks.len() as u64 * chunk_size,
-            size: (size % chunk_size) as usize,
+            size: size % chunk_size,
         };
         chunks.push(chunk);
     }
@@ -102,14 +88,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_chunk_file() {
-        let res = split_file_by_part_size("/tmp/tmp.txt", 1024).await;
+        let f = tokio::fs::File::open("/tmp/tmp.txt").await.unwrap();
+        let res = split_file_by_part_size(&f, 1024).await;
         // println!("res: {:?}", res.unwrap());
         assert!(res.is_ok());
     }
 
-    #[test]
-    fn test_load_chunk_file() {
-        let data = load_chunk_file("/tmp/tmp.txt", 0, 100).unwrap();
+    #[tokio::test]
+    async fn test_load_chunk_file() {
+        let mut f = tokio::fs::File::open("/tmp/tmp.txt").await.unwrap();
+        let data = load_chunk_file(&mut f, 0, 100).await.unwrap();
         println!("data: {:?}", data);
     }
 }

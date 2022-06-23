@@ -421,6 +421,7 @@ impl OSS {
         H: Into<Option<HashMap<S3, S3>>>,
         R: Into<Option<HashMap<S3, Option<S3>>>>,
     {
+        let mut file = tokio::fs::File::open(file.as_ref()).await?;
         let object_name = object_name.as_ref();
         let resources_str = if let Some(r) = resources.into() {
             self.get_resources_str(r)
@@ -429,7 +430,7 @@ impl OSS {
         };
         let host = self.host(self.bucket(), object_name, &resources_str);
         let date = self.date();
-        let buf = load_file(file)?;
+        let buf = load_file(&mut file).await?;
         let mut headers = if let Some(h) = headers.into() {
             to_headers(h)?
         } else {
@@ -519,10 +520,10 @@ impl OSS {
     }
 
     // https://help.aliyun.com/document_detail/31993.html
-    async fn upload_part<S1, S2, S3, H>(
+    async fn upload_part<S1, S2, H>(
         &self,
-        file: S1,
-        object_name: S2,
+        file: &mut tokio::fs::File,
+        object_name: S1,
         chunk: FileChunk,
         upload_id: String,
         headers: H,
@@ -530,8 +531,7 @@ impl OSS {
     where
         S1: AsRef<str>,
         S2: AsRef<str>,
-        S3: AsRef<str>,
-        H: Into<Option<HashMap<S3, S3>>>,
+        H: Into<Option<HashMap<S2, S2>>>,
     {
         let object_name = object_name.as_ref();
         let resources_str = &format!("partNumber={}&uploadId={}", chunk.number, upload_id);
@@ -556,7 +556,7 @@ impl OSS {
         );
         headers.insert("Authorization", authorization.parse()?);
 
-        let buf = load_chunk_file(file, chunk.offset, chunk.size)?;
+        let buf = load_chunk_file(file, chunk.offset, chunk.size).await?;
         headers.insert(CONTENT_LENGTH, buf.len().to_string().parse()?);
 
         let resp = self
@@ -631,6 +631,48 @@ impl OSS {
         }
     }
 
+    // https://help.aliyun.com/document_detail/31996.html
+    async fn abort_multipart_upload<S1>(
+        &self,
+        object_name: S1,
+        upload_id: String,
+    ) -> Result<(), Error>
+    where
+        S1: AsRef<str>,
+    {
+        let object_name = object_name.as_ref();
+        let resources_str = &format!("uploadId={}", upload_id);
+
+        let host = self.host(self.bucket(), object_name, resources_str);
+        let date = self.date();
+        let mut headers = HeaderMap::new();
+        headers.insert(DATE, date.parse()?);
+        let authorization = self.oss_sign(
+            "DELETE",
+            self.key_id(),
+            self.key_secret(),
+            self.bucket(),
+            object_name,
+            resources_str,
+            &headers,
+        );
+        headers.insert("Authorization", authorization.parse()?);
+
+        let resp = self.client.delete(&host).send().await?;
+
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(Error::Object(ObjectError::DeleteError {
+                msg: format!(
+                    "can not abort multipart upload, reason: {:?}",
+                    resp.text().await
+                )
+                .into(),
+            }))
+        }
+    }
+
     // <MinSizeAllowed>102400</MinSizeAllowed>
     pub async fn chunk_upload_by_size<S1, H>(
         &self,
@@ -643,24 +685,34 @@ impl OSS {
         S1: AsRef<str>,
         H: Into<Option<HashMap<S1, S1>>>,
     {
-        let object_name = object_name.as_ref();
-        let file = file.as_ref();
-        // init multi upload
-        let upload_id = self.initiate_multipart_upload(object_name, headers).await?;
+        let mut file = tokio::fs::File::open(file.as_ref()).await?;
         // chunk object
-        let chunks = split_file_by_part_size(file, chunk_size).await.unwrap();
+        let chunks = split_file_by_part_size(&file, chunk_size).await?;
+        if chunks.is_empty() {
+            return Err(Error::E("chunks is empty".to_owned()));
+        }
+        // init multi upload
+        let object_name = object_name.as_ref();
+        let upload_id = self.initiate_multipart_upload(object_name, headers).await?;
         // part upload
         let mut parts = vec![];
         for chunk in chunks {
-            let etag = self
+            let etag = match self
                 .upload_part(
-                    file,
+                    &mut file,
                     object_name,
                     chunk.clone(),
                     upload_id.clone(),
                     None::<HashMap<&str, &str>>,
                 )
-                .await?;
+                .await
+            {
+                Ok(etag) => etag,
+                Err(e) => {
+                    let _ = self.abort_multipart_upload(object_name, upload_id).await;
+                    return Err(e);
+                }
+            };
             parts.push(Part {
                 PartNumber: chunk.number,
                 ETag: etag,
